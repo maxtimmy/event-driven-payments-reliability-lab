@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment: {POSTGRES_DB: payments, POSTGRES_USER: payments, POSTGRES_PASSWORD: payments}
+    ports: ["5432:5432"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U payments"], interval: 2s, timeout: 2s, retries: 20}
+  redpanda:
+    image: redpandadata/redpanda:v24.2.9
+    command: ["redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "internal://0.0.0.0:9092,external://0.0.0.0:19092,proxy://0.0.0.0:29093", "--advertise-kafka-addr", "internal://redpanda:9092,external://localhost:19092,proxy://toxiproxy:29092"]
+    ports: ["19092:19092", "9644:9644"]
+    healthcheck: {test: ["CMD-SHELL", "rpk cluster health | grep -q Healthy"], interval: 3s, timeout: 3s, retries: 30}
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports: ["8474:8474"]
+  toxiproxy-init:
+    build: .
+    command: ["python", "-m", "payments_lab.faults", "init"]
+    environment: {TOXIPROXY_URL: http://toxiproxy:8474, POSTGRES_UPSTREAM: postgres:5432, REDPANDA_UPSTREAM: redpanda:29093}
+    depends_on: {toxiproxy: {condition: service_started}, postgres: {condition: service_healthy}, redpanda: {condition: service_healthy}}
+  topic-init:
+    image: redpandadata/redpanda:v24.2.9
+    command: ["topic", "create", "payments.events.v1", "payments.ledger.dlq.v1", "payments.notification.dlq.v1", "payments.reconciliation.dlq.v1", "--brokers", "redpanda:9092", "--partitions", "3"]
+    entrypoint: ["rpk"]
+    depends_on: {redpanda: {condition: service_healthy}}
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment: {DATABASE_URL: postgresql+psycopg://payments:payments@postgres:5432/payments, KAFKA_BOOTSTRAP_SERVERS: redpanda:9092}
+    depends_on: {postgres: {condition: service_healthy}}
+  api:
+    build: .
+    environment: &env {DATABASE_URL: postgresql+psycopg://payments:payments@toxiproxy:15432/payments, KAFKA_BOOTSTRAP_SERVERS: toxiproxy:29092, DATABASE_CONNECT_TIMEOUT: 1, WORKER_RECOVERY_BACKOFF: 0.25, TOXIPROXY_URL: http://toxiproxy:8474}
+    ports: ["8000:8000"]
+    depends_on: {migrate: {condition: service_completed_successfully}, toxiproxy-init: {condition: service_completed_successfully}}
+    healthcheck: {test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"], interval: 3s, timeout: 2s, retries: 20}
+  relay:
+    build: .
+    command: ["python", "-m", "payments_lab.relay"]
+    environment: *env
+    depends_on: {migrate: {condition: service_completed_successfully}, topic-init: {condition: service_completed_successfully}, toxiproxy-init: {condition: service_completed_successfully}}
+    healthcheck: &worker-health {test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health/ready')"], interval: 3s, timeout: 2s, retries: 20}
+  ledger:
+    build: .
+    command: ["python", "-m", "payments_lab.consumers"]
+    environment: {DATABASE_URL: postgresql+psycopg://payments:payments@toxiproxy:15432/payments, KAFKA_BOOTSTRAP_SERVERS: toxiproxy:29092, CONSUMER_NAME: ledger, DATABASE_CONNECT_TIMEOUT: 1, WORKER_RECOVERY_BACKOFF: 0.25}
+    depends_on: {migrate: {condition: service_completed_successfully}, topic-init: {condition: service_completed_successfully}, toxiproxy-init: {condition: service_completed_successfully}}
+    healthcheck: *worker-health
+  notification:
+    build: .
+    command: ["python", "-m", "payments_lab.consumers"]
+    environment: {DATABASE_URL: postgresql+psycopg://payments:payments@toxiproxy:15432/payments, KAFKA_BOOTSTRAP_SERVERS: toxiproxy:29092, CONSUMER_NAME: notification, DATABASE_CONNECT_TIMEOUT: 1, WORKER_RECOVERY_BACKOFF: 0.25}
+    depends_on: {migrate: {condition: service_completed_successfully}, topic-init: {condition: service_completed_successfully}, toxiproxy-init: {condition: service_completed_successfully}}
+    healthcheck: *worker-health
+  reconciliation:
+    build: .
+    command: ["python", "-m", "payments_lab.consumers"]
+    environment: {DATABASE_URL: postgresql+psycopg://payments:payments@toxiproxy:15432/payments, KAFKA_BOOTSTRAP_SERVERS: toxiproxy:29092, CONSUMER_NAME: reconciliation, DATABASE_CONNECT_TIMEOUT: 1, WORKER_RECOVERY_BACKOFF: 0.25}
+    depends_on: {migrate: {condition: service_completed_successfully}, topic-init: {condition: service_completed_successfully}, toxiproxy-init: {condition: service_completed_successfully}}
+    healthcheck: *worker-health
