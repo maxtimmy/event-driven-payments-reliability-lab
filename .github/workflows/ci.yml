@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -28,7 +28,7 @@ jobs:
           pytest -ra --cov=payments_lab --cov-report=term-missing --cov-report=xml --cov-report=html --junitxml=test-results/junit.xml
       - name: Upload test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-evidence
           path: |
@@ -42,8 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Start clean stack
@@ -55,7 +55,7 @@ jobs:
         run: docker compose logs --no-color > compose-failure.log
       - name: Upload Compose failure log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compose-failure-log
           path: compose-failure.log
